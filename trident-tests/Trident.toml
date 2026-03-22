@@ -1,0 +1,8 @@
+[fuzz.metrics]
+enabled = true
+
+
+[[fuzz.programs]]
+address = "DbKQRFejQdTXuvd8NDNVX8uXYNXWNHVnxJi3JyEJhXbN"
+program = "../target/deploy/fuzztooldemo.so"
+ 
