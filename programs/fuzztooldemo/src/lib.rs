@@ -33,6 +33,15 @@ pub mod fuzztooldemo {
         Ok(())
     }
 
+    // Minimal missing signer check demo for fuzzing bootstrap.
+    pub fn msc_minimal(ctx: Context<MscMinimal>, marker: u8) -> Result<()> {
+        let mut data = ctx.accounts.target.try_borrow_mut_data()?;
+        if !data.is_empty() {
+            data[0] = marker;
+        }
+        Ok(())
+    }
+
     // Missing owner check: trusts data from an arbitrary account.
     pub fn moc_set_secret(ctx: Context<MocSetSecret>, new_secret: u64) -> Result<()> {
         let policy_data = ctx.accounts.policy_account.try_borrow_data()?;
@@ -91,6 +100,15 @@ pub struct MscSetSecret<'info> {
     #[account(mut)]
     pub state: Account<'info, DemoState>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
+    pub authority: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct MscMinimal<'info> {
+    /// CHECK: Intentionally unchecked writable account for minimal demo.
+    #[account(mut)]
+    pub target: UncheckedAccount<'info>,
+    /// CHECK: Intentionally unchecked and no signer requirement.
     pub authority: UncheckedAccount<'info>,
 }
 

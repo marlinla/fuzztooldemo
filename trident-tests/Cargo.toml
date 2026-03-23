@@ -7,7 +7,9 @@ description = "Created with Trident"
 edition = "2021"
 
 [dependencies]
+anchor-lang = "0.32.1"
 borsh = "1.5.3"
+fuzztooldemo = { path = "../programs/fuzztooldemo", features = ["no-entrypoint"] }
 
 [dependencies.trident-fuzz]
 version = "0.12.0"
