@@ -1,3 +1,4 @@
+use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -61,7 +62,10 @@ impl AcpiFuzz {
 
     #[flow]
     fn arbitrary_cpi_flow(&mut self) {
-        let use_attacker_program = true;
+        // ~10% of iterations pass an untrusted plugin program; the rest use the trusted id from state.
+        let attempt_vulnerable =
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let use_attacker_program = attempt_vulnerable;
         let callee_program = if use_attacker_program {
             self.fuzz_accounts.attacker_program
         } else {
@@ -115,5 +119,8 @@ fn set_anchor_account<T: AnchorSerialize>(
 }
 
 fn main() {
-    AcpiFuzz::fuzz(400, 50);
+    AcpiFuzz::fuzz(
+        env_u64(ENV_FUZZ_ITERATIONS, 400),
+        env_u64(ENV_FUZZ_FLOW_CALLS, 50),
+    );
 }

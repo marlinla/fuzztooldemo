@@ -1,3 +1,4 @@
+use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -74,11 +75,22 @@ impl IbFuzz {
 
     #[flow]
     fn integer_bug_flow(&mut self) {
-        let from_initial = self.trident.random_from_range(0u64..=100u64);
-        let to_initial = self
-            .trident
-            .random_from_range((u64::MAX - 100u64)..=u64::MAX);
-        let amount = self.trident.random_from_range(0u64..=u64::MAX);
+        // ~10% of iterations force underflow or overflow; the rest use safe values (no wrapping bug).
+        let attempt_vulnerable =
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let (from_initial, to_initial, amount) = if attempt_vulnerable {
+            let from_initial = self.trident.random_from_range(0u64..=100u64);
+            let to_initial = self
+                .trident
+                .random_from_range((u64::MAX - 100u64)..=u64::MAX);
+            let amount = self.trident.random_from_range(0u64..=u64::MAX);
+            (from_initial, to_initial, amount)
+        } else {
+            let from_initial = self.trident.random_from_range(50u64..=100u64);
+            let to_initial = self.trident.random_from_range(0u64..=1_000_000u64);
+            let amount = self.trident.random_from_range(0u64..=from_initial);
+            (from_initial, to_initial, amount)
+        };
 
         set_anchor_account(
             &mut self.trident,
@@ -114,7 +126,7 @@ impl IbFuzz {
         let underflow_path = amount > from_initial;
         let overflow_path = to_initial.checked_add(amount).is_none();
 
-        if tx_result.is_success() && (underflow_path || overflow_path) {
+        if attempt_vulnerable && tx_result.is_success() && (underflow_path || overflow_path) {
             eprintln!(
                 "IB finding: wrapping internal vault transfer accepted (from={}, to={}, amount={}).",
                 from_initial, to_initial, amount
@@ -141,5 +153,8 @@ fn set_anchor_account<T: AnchorSerialize>(
 }
 
 fn main() {
-    IbFuzz::fuzz(400, 50);
+    IbFuzz::fuzz(
+        env_u64(ENV_FUZZ_ITERATIONS, 400),
+        env_u64(ENV_FUZZ_FLOW_CALLS, 50),
+    );
 }

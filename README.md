@@ -111,7 +111,33 @@ cargo build-sbf --manifest-path "programs/fuzztooldemo/Cargo.toml" --sbf-out-dir
 ./presentation-demo.sh
 ```
 
-Expected summary status:
+Optional tuning (same variables work for `cargo run --bin fuzz_msc` etc.):
+
+- `DEMO_VULN_ROLL_DENOM` — vulnerable-path attempt rate `1/N` (default `10`).
+- `DEMO_FUZZ_ITERATIONS` — Trident `fuzz` iteration count (overrides each target’s default when set).
+- `DEMO_FUZZ_FLOW_CALLS` — flow calls per iteration (Trident second parameter).
+
+**Flow attempts per target:** Trident runs roughly `DEMO_FUZZ_ITERATIONS × DEMO_FUZZ_FLOW_CALLS` flow executions per binary (when both env vars are set). Example: `25 × 10 = 250` tries per target. With `DEMO_VULN_ROLL_DENOM=80`, the expected number of vulnerable-path attempts per target is `250 / 80 ≈ 3.1`, so every target usually hits a finding—**not** a “mixed” run.
+
+Example presets (all probabilistic; **IB** is still the noisiest):
+
+- **Likely all `FOUND`:** many tries or `DEMO_VULN_ROLL_DENOM=1` (always take the vulnerable branch):
+
+  `./presentation-demo.sh --vuln-denom 1 --fuzz-iterations 800 --flow-calls 50`
+
+- **Likely all `NO_FINDING`:** huge denominator, tiny workload:
+
+  `./presentation-demo.sh --vuln-denom 100000 --fuzz-iterations 3 --flow-calls 1`
+
+- **Mixed summary (varies run-to-run):** keep **low** total flows so `(1 - 1/N)^trials` stays nontrivial—e.g. `trials ≈ 6–15`:
+
+  `./presentation-demo.sh --vuln-denom 80 --fuzz-iterations 1 --flow-calls 8`
+
+  Re-run several times; you should see some `NO_FINDING` rows. For a middle ground:
+
+  `./presentation-demo.sh --vuln-denom 40 --fuzz-iterations 2 --flow-calls 5` (20 tries per target; still often finds).
+
+Expected summary status (default / high-effort demo):
 
 ```text
 fuzz_msc  | FOUND

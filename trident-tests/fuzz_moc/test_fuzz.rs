@@ -1,3 +1,4 @@
+use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -49,7 +50,10 @@ impl MocFuzz {
 
     #[flow]
     fn missing_owner_check_flow(&mut self) {
-        let attacker_owned = true;
+        // ~10% of iterations use an attacker-owned policy account; the rest use the vault program owner.
+        let attempt_vulnerable =
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let attacker_owned = attempt_vulnerable;
         let policy_owner = if attacker_owned {
             self.trident.random_pubkey()
         } else {
@@ -109,5 +113,8 @@ fn set_anchor_account<T: AnchorSerialize>(
 }
 
 fn main() {
-    MocFuzz::fuzz(400, 50);
+    MocFuzz::fuzz(
+        env_u64(ENV_FUZZ_ITERATIONS, 400),
+        env_u64(ENV_FUZZ_FLOW_CALLS, 50),
+    );
 }

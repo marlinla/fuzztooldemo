@@ -1,3 +1,4 @@
+use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -54,7 +55,10 @@ impl MscFuzz {
 
     #[flow]
     fn missing_signer_check_flow(&mut self) {
-        let should_sign_authority = false;
+        // ~10% of iterations attempt the vulnerable path (non-signer); the rest use a signer.
+        let attempt_vulnerable =
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let should_sign_authority = !attempt_vulnerable;
         let new_limit = self.trident.random_from_range(11u64..=u64::MAX);
 
         let mut account_metas = fuzztooldemo::accounts::MscUpdateWithdrawLimit {
@@ -86,7 +90,10 @@ impl MscFuzz {
 }
 
 fn main() {
-    MscFuzz::fuzz(100, 10);
+    MscFuzz::fuzz(
+        env_u64(ENV_FUZZ_ITERATIONS, 100),
+        env_u64(ENV_FUZZ_FLOW_CALLS, 10),
+    );
 }
 
 fn set_anchor_account<T: AnchorSerialize>(
