@@ -2,11 +2,11 @@ use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use anchor_lang::Discriminator;
-use anchor_lang::AccountSerialize;
+use anchor_lang::AnchorSerialize;
 
 #[derive(Default)]
 struct AccountAddresses {
-    state: Pubkey,
+    vault_state: Pubkey,
     policy_account: Pubkey,
 }
 
@@ -27,21 +27,22 @@ impl MocFuzz {
 
     #[init]
     fn start(&mut self) {
-        self.fuzz_accounts.state = self.trident.random_pubkey();
+        self.fuzz_accounts.vault_state = self.trident.random_pubkey();
         self.fuzz_accounts.policy_account = self.trident.random_pubkey();
 
-        let state = fuzztooldemo::DemoState {
+        let state = fuzztooldemo::VaultState {
             authority: self.trident.random_pubkey(),
-            trusted_cpi_program: self.trident.random_pubkey(),
-            trusted_clock_key: self.trident.random_pubkey(),
+            trusted_plugin_program: self.trident.random_pubkey(),
+            trusted_clock_key: solana_sdk::sysvar::clock::id(),
+            withdraw_limit: 100,
             secret: 0,
-            counter: 0,
+            payout_count: 0,
         };
         set_anchor_account(
             &mut self.trident,
-            &self.fuzz_accounts.state,
+            &self.fuzz_accounts.vault_state,
             &fuzztooldemo::id(),
-            fuzztooldemo::DemoState::DISCRIMINATOR,
+            fuzztooldemo::VaultState::DISCRIMINATOR,
             &state,
         );
     }
@@ -71,25 +72,27 @@ impl MocFuzz {
         let new_secret = self.trident.random_from_range(0u64..=u64::MAX);
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::MocSetSecret {
-                state: self.fuzz_accounts.state,
+            accounts: fuzztooldemo::accounts::MocUpdatePolicySecret {
+                vault_state: self.fuzz_accounts.vault_state,
                 policy_account: self.fuzz_accounts.policy_account,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::MocSetSecret { new_secret }.data(),
+            data: fuzztooldemo::instruction::MocUpdatePolicySecret { new_secret }.data(),
         };
 
-        let tx_result = self.trident.process_transaction(&[ix], Some("moc_set_secret"));
+        let tx_result = self
+            .trident
+            .process_transaction(&[ix], Some("moc_update_policy_secret"));
         if attacker_owned && tx_result.is_success() {
             eprintln!(
-                "MOC finding: attacker-owned policy account accepted for state update."
+                "MOC finding: attacker-owned policy account accepted for vault secret update."
             );
             std::process::exit(99);
         }
     }
 }
 
-fn set_anchor_account<T: AccountSerialize>(
+fn set_anchor_account<T: AnchorSerialize>(
     trident: &mut Trident,
     key: &Pubkey,
     owner: &Pubkey,
@@ -98,7 +101,7 @@ fn set_anchor_account<T: AccountSerialize>(
 ) {
     let mut data = discriminator.to_vec();
     value
-        .try_serialize(&mut data)
+        .serialize(&mut data)
         .expect("anchor serialization for fuzz account should succeed");
     let mut account = AccountSharedData::new(1_000_000, data.len(), owner);
     account.set_data_from_slice(&data);

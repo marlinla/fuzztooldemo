@@ -2,11 +2,11 @@ use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use anchor_lang::Discriminator;
-use anchor_lang::AccountSerialize;
+use anchor_lang::AnchorSerialize;
 
 #[derive(Default)]
 struct AccountAddresses {
-    state: Pubkey,
+    vault_state: Pubkey,
     spoofed_clock_like: Pubkey,
 }
 
@@ -27,21 +27,22 @@ impl MkcFuzz {
 
     #[init]
     fn start(&mut self) {
-        self.fuzz_accounts.state = self.trident.random_pubkey();
+        self.fuzz_accounts.vault_state = self.trident.random_pubkey();
         self.fuzz_accounts.spoofed_clock_like = self.trident.random_pubkey();
 
-        let state = fuzztooldemo::DemoState {
+        let state = fuzztooldemo::VaultState {
             authority: self.trident.random_pubkey(),
-            trusted_cpi_program: self.trident.random_pubkey(),
+            trusted_plugin_program: self.trident.random_pubkey(),
             trusted_clock_key: solana_sdk::sysvar::clock::id(),
+            withdraw_limit: 100,
             secret: 0,
-            counter: 0,
+            payout_count: 0,
         };
         set_anchor_account(
             &mut self.trident,
-            &self.fuzz_accounts.state,
+            &self.fuzz_accounts.vault_state,
             &fuzztooldemo::id(),
-            fuzztooldemo::DemoState::DISCRIMINATOR,
+            fuzztooldemo::VaultState::DISCRIMINATOR,
             &state,
         );
 
@@ -72,18 +73,20 @@ impl MkcFuzz {
 
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::MkcGate {
-                state: self.fuzz_accounts.state,
+            accounts: fuzztooldemo::accounts::MkcClockGate {
+                vault_state: self.fuzz_accounts.vault_state,
                 clock_like: self.fuzz_accounts.spoofed_clock_like,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::MkcGate { min_slot }.data(),
+            data: fuzztooldemo::instruction::MkcClockGate { min_slot }.data(),
         };
 
-        let tx_result = self.trident.process_transaction(&[ix], Some("mkc_gate"));
+        let tx_result = self
+            .trident
+            .process_transaction(&[ix], Some("mkc_clock_gate"));
         if tx_result.is_success() {
             eprintln!(
-                "MKC finding: spoofed non-sysvar clock accepted (slot={}, min_slot={}).",
+                "MKC finding: spoofed non-sysvar clock accepted for vault gate (slot={}, min_slot={}).",
                 provided_slot, min_slot
             );
             std::process::exit(99);
@@ -91,7 +94,7 @@ impl MkcFuzz {
     }
 }
 
-fn set_anchor_account<T: AccountSerialize>(
+fn set_anchor_account<T: AnchorSerialize>(
     trident: &mut Trident,
     key: &Pubkey,
     owner: &Pubkey,
@@ -100,7 +103,7 @@ fn set_anchor_account<T: AccountSerialize>(
 ) {
     let mut data = discriminator.to_vec();
     value
-        .try_serialize(&mut data)
+        .serialize(&mut data)
         .expect("anchor serialization for fuzz account should succeed");
     let mut account = AccountSharedData::new(1_000_000, data.len(), owner);
     account.set_data_from_slice(&data);

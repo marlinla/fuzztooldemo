@@ -2,11 +2,12 @@ use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use anchor_lang::Discriminator;
-use anchor_lang::AccountSerialize;
+use anchor_lang::AnchorSerialize;
 
 #[derive(Default)]
 struct AccountAddresses {
-    state: Pubkey,
+    vault_state: Pubkey,
+    treasury_vault: Pubkey,
     trusted_program: Pubkey,
     attacker_program: Pubkey,
 }
@@ -28,23 +29,33 @@ impl AcpiFuzz {
 
     #[init]
     fn start(&mut self) {
-        self.fuzz_accounts.state = self.trident.random_pubkey();
+        self.fuzz_accounts.vault_state = self.trident.random_pubkey();
+        self.fuzz_accounts.treasury_vault = self.trident.random_pubkey();
         self.fuzz_accounts.trusted_program = solana_sdk::system_program::id();
         self.fuzz_accounts.attacker_program = solana_sdk::stake::program::id();
 
-        let state = fuzztooldemo::DemoState {
+        let state = fuzztooldemo::VaultState {
             authority: self.trident.random_pubkey(),
-            trusted_cpi_program: self.fuzz_accounts.trusted_program,
-            trusted_clock_key: self.trident.random_pubkey(),
+            trusted_plugin_program: self.fuzz_accounts.trusted_program,
+            trusted_clock_key: solana_sdk::sysvar::clock::id(),
+            withdraw_limit: 10,
             secret: 0,
-            counter: 0,
+            payout_count: 0,
         };
         set_anchor_account(
             &mut self.trident,
-            &self.fuzz_accounts.state,
+            &self.fuzz_accounts.vault_state,
             &fuzztooldemo::id(),
-            fuzztooldemo::DemoState::DISCRIMINATOR,
+            fuzztooldemo::VaultState::DISCRIMINATOR,
             &state,
+        );
+
+        set_anchor_account(
+            &mut self.trident,
+            &self.fuzz_accounts.treasury_vault,
+            &fuzztooldemo::id(),
+            fuzztooldemo::VaultBalance::DISCRIMINATOR,
+            &fuzztooldemo::VaultBalance { amount: 1_000_000 },
         );
     }
 
@@ -57,25 +68,29 @@ impl AcpiFuzz {
             self.fuzz_accounts.trusted_program
         };
         let payload = vec![0u8; self.trident.random_from_range(0usize..=8usize)];
+        let amount = self.trident.random_from_range(1u64..=5_000u64);
 
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::AcpiCall {
-                state: self.fuzz_accounts.state,
-                callee_program,
+            accounts: fuzztooldemo::accounts::AcpiPluginPayout {
+                vault_state: self.fuzz_accounts.vault_state,
+                treasury_vault: self.fuzz_accounts.treasury_vault,
+                plugin_program: callee_program,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::AcpiCall { payload }.data(),
+            data: fuzztooldemo::instruction::AcpiPluginPayout { amount, payload }.data(),
         };
 
-        let tx_result = self.trident.process_transaction(&[ix], Some("acpi_call"));
+        let tx_result = self
+            .trident
+            .process_transaction(&[ix], Some("acpi_plugin_payout"));
         let logs = tx_result.logs();
         let cpi_reached = logs.contains("invoke [2]") && logs.contains(&callee_program.to_string());
 
         // Finding criterion: untrusted callee was reached by CPI at all.
         if use_attacker_program && cpi_reached {
             eprintln!(
-                "ACPI finding: CPI reached untrusted program {}.",
+                "ACPI finding: plugin payout invoked untrusted program {}.",
                 callee_program
             );
             std::process::exit(99);
@@ -83,7 +98,7 @@ impl AcpiFuzz {
     }
 }
 
-fn set_anchor_account<T: AccountSerialize>(
+fn set_anchor_account<T: AnchorSerialize>(
     trident: &mut Trident,
     key: &Pubkey,
     owner: &Pubkey,
@@ -92,7 +107,7 @@ fn set_anchor_account<T: AccountSerialize>(
 ) {
     let mut data = discriminator.to_vec();
     value
-        .try_serialize(&mut data)
+        .serialize(&mut data)
         .expect("anchor serialization for fuzz account should succeed");
     let mut account = AccountSharedData::new(1_000_000, data.len(), owner);
     account.set_data_from_slice(&data);

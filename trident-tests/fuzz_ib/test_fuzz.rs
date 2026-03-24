@@ -2,11 +2,11 @@ use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
 use anchor_lang::Discriminator;
-use anchor_lang::AccountSerialize;
+use anchor_lang::AnchorSerialize;
 
 #[derive(Default)]
 struct AccountAddresses {
-    state: Pubkey,
+    vault_state: Pubkey,
     from_vault: Pubkey,
     to_vault: Pubkey,
 }
@@ -28,22 +28,23 @@ impl IbFuzz {
 
     #[init]
     fn start(&mut self) {
-        self.fuzz_accounts.state = self.trident.random_pubkey();
+        self.fuzz_accounts.vault_state = self.trident.random_pubkey();
         self.fuzz_accounts.from_vault = self.trident.random_pubkey();
         self.fuzz_accounts.to_vault = self.trident.random_pubkey();
 
-        let state = fuzztooldemo::DemoState {
+        let state = fuzztooldemo::VaultState {
             authority: self.trident.random_pubkey(),
-            trusted_cpi_program: self.trident.random_pubkey(),
+            trusted_plugin_program: self.trident.random_pubkey(),
             trusted_clock_key: self.trident.random_pubkey(),
+            withdraw_limit: 100,
             secret: 0,
-            counter: 0,
+            payout_count: 0,
         };
         set_anchor_account(
             &mut self.trident,
-            &self.fuzz_accounts.state,
+            &self.fuzz_accounts.vault_state,
             &fuzztooldemo::id(),
-            fuzztooldemo::DemoState::DISCRIMINATOR,
+            fuzztooldemo::VaultState::DISCRIMINATOR,
             &state,
         );
 
@@ -98,22 +99,24 @@ impl IbFuzz {
 
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::IbTransfer {
-                state: self.fuzz_accounts.state,
+            accounts: fuzztooldemo::accounts::IbInternalTransfer {
+                vault_state: self.fuzz_accounts.vault_state,
                 from_vault: self.fuzz_accounts.from_vault,
                 to_vault: self.fuzz_accounts.to_vault,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::IbTransfer { amount }.data(),
+            data: fuzztooldemo::instruction::IbInternalTransfer { amount }.data(),
         };
 
-        let tx_result = self.trident.process_transaction(&[ix], Some("ib_transfer"));
+        let tx_result = self
+            .trident
+            .process_transaction(&[ix], Some("ib_internal_transfer"));
         let underflow_path = amount > from_initial;
         let overflow_path = to_initial.checked_add(amount).is_none();
 
         if tx_result.is_success() && (underflow_path || overflow_path) {
             eprintln!(
-                "IB finding: wrapping transfer accepted (from={}, to={}, amount={}).",
+                "IB finding: wrapping internal vault transfer accepted (from={}, to={}, amount={}).",
                 from_initial, to_initial, amount
             );
             std::process::exit(99);
@@ -121,7 +124,7 @@ impl IbFuzz {
     }
 }
 
-fn set_anchor_account<T: AccountSerialize>(
+fn set_anchor_account<T: AnchorSerialize>(
     trident: &mut Trident,
     key: &Pubkey,
     owner: &Pubkey,
@@ -130,7 +133,7 @@ fn set_anchor_account<T: AccountSerialize>(
 ) {
     let mut data = discriminator.to_vec();
     value
-        .try_serialize(&mut data)
+        .serialize(&mut data)
         .expect("anchor serialization for fuzz account should succeed");
     let mut account = AccountSharedData::new(1_000_000, data.len(), owner);
     account.set_data_from_slice(&data);

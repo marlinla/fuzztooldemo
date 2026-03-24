@@ -1,10 +1,12 @@
 use trident_fuzz::fuzzing::*;
-use anchor_lang::ToAccountMetas;
 use anchor_lang::InstructionData;
+use anchor_lang::ToAccountMetas;
+use anchor_lang::Discriminator;
+use anchor_lang::AnchorSerialize;
 
 #[derive(Default)]
 struct AccountAddresses {
-    target: Pubkey,
+    vault_state: Pubkey,
     authority: Pubkey,
 }
 
@@ -25,15 +27,24 @@ impl MscFuzz {
 
     #[init]
     fn start(&mut self) {
-        self.fuzz_accounts.target = self.trident.random_pubkey();
+        self.fuzz_accounts.vault_state = self.trident.random_pubkey();
         self.fuzz_accounts.authority = self.trident.random_pubkey();
 
-        let target_data = vec![0u8; 8];
-        let mut target_account =
-            AccountSharedData::new(1_000_000, target_data.len(), &fuzztooldemo::id());
-        target_account.set_data_from_slice(&target_data);
-        self.trident
-            .set_account_custom(&self.fuzz_accounts.target, &target_account);
+        let state = fuzztooldemo::VaultState {
+            authority: self.fuzz_accounts.authority,
+            trusted_plugin_program: solana_sdk::system_program::id(),
+            trusted_clock_key: solana_sdk::sysvar::clock::id(),
+            withdraw_limit: 10,
+            secret: 0,
+            payout_count: 0,
+        };
+        set_anchor_account(
+            &mut self.trident,
+            &self.fuzz_accounts.vault_state,
+            &fuzztooldemo::id(),
+            fuzztooldemo::VaultState::DISCRIMINATOR,
+            &state,
+        );
 
         let authority_account =
             AccountSharedData::new(1_000_000, 0, &solana_sdk::system_program::id());
@@ -44,10 +55,10 @@ impl MscFuzz {
     #[flow]
     fn missing_signer_check_flow(&mut self) {
         let should_sign_authority = false;
-        let marker = self.trident.random_from_range(1u8..=u8::MAX);
+        let new_limit = self.trident.random_from_range(11u64..=u64::MAX);
 
-        let mut account_metas = fuzztooldemo::accounts::MscMinimal {
-            target: self.fuzz_accounts.target,
+        let mut account_metas = fuzztooldemo::accounts::MscUpdateWithdrawLimit {
+            vault_state: self.fuzz_accounts.vault_state,
             authority: self.fuzz_accounts.authority,
         }
         .to_account_metas(None);
@@ -58,16 +69,16 @@ impl MscFuzz {
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
             accounts: account_metas,
-            data: fuzztooldemo::instruction::MscMinimal { marker }.data(),
+            data: fuzztooldemo::instruction::MscUpdateWithdrawLimit { new_limit }.data(),
         };
 
         let tx_result = self
             .trident
-            .process_transaction(&[ix], Some("msc_minimal"));
+            .process_transaction(&[ix], Some("msc_update_withdraw_limit"));
 
         if !should_sign_authority && tx_result.is_success() {
             eprintln!(
-                "MSC finding: non-signer authority call succeeded (seeded run should reject this)."
+                "MSC finding: non-signer authority updated withdraw_limit."
             );
             std::process::exit(99);
         }
@@ -76,4 +87,20 @@ impl MscFuzz {
 
 fn main() {
     MscFuzz::fuzz(100, 10);
+}
+
+fn set_anchor_account<T: AnchorSerialize>(
+    trident: &mut Trident,
+    key: &Pubkey,
+    owner: &Pubkey,
+    discriminator: &[u8],
+    value: &T,
+) {
+    let mut data = discriminator.to_vec();
+    value
+        .serialize(&mut data)
+        .expect("anchor serialization for fuzz account should succeed");
+    let mut account = AccountSharedData::new(1_000_000, data.len(), owner);
+    account.set_data_from_slice(&data);
+    trident.set_account_custom(key, &account);
 }
