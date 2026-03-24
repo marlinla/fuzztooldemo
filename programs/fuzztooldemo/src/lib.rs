@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
+#[cfg(target_os = "solana")]
 use anchor_lang::solana_program::program::invoke;
 
 declare_id!("DbKQRFejQdTXuvd8NDNVX8uXYNXWNHVnxJi3JyEJhXbN");
@@ -8,77 +9,96 @@ declare_id!("DbKQRFejQdTXuvd8NDNVX8uXYNXWNHVnxJi3JyEJhXbN");
 pub mod fuzztooldemo {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        trusted_cpi_program: Pubkey,
+    pub fn initialize_vault(
+        ctx: Context<InitializeVault>,
+        trusted_plugin_program: Pubkey,
         trusted_clock_key: Pubkey,
     ) -> Result<()> {
-        let state = &mut ctx.accounts.state;
+        let state = &mut ctx.accounts.vault_state;
         state.authority = ctx.accounts.authority.key();
-        state.trusted_cpi_program = trusted_cpi_program;
+        state.trusted_plugin_program = trusted_plugin_program;
         state.trusted_clock_key = trusted_clock_key;
+        state.withdraw_limit = 1_000_000;
         state.secret = 0;
-        state.counter = 0;
+        state.payout_count = 0;
         Ok(())
     }
 
     // Missing signer check: only key equality is checked, not signature.
-    pub fn msc_set_secret(ctx: Context<MscSetSecret>, new_secret: u64) -> Result<()> {
+    pub fn msc_update_withdraw_limit(
+        ctx: Context<MscUpdateWithdrawLimit>,
+        new_limit: u64,
+    ) -> Result<()> {
         require_keys_eq!(
             ctx.accounts.authority.key(),
-            ctx.accounts.state.authority,
-            DemoError::Unauthorized
+            ctx.accounts.vault_state.authority,
+            VaultDemoError::Unauthorized
         );
-        ctx.accounts.state.secret = new_secret;
+        ctx.accounts.vault_state.withdraw_limit = new_limit;
         Ok(())
     }
 
-    // Minimal missing signer check demo for fuzzing bootstrap.
-    pub fn msc_minimal(ctx: Context<MscMinimal>, marker: u8) -> Result<()> {
-        let mut data = ctx.accounts.target.try_borrow_mut_data()?;
-        if !data.is_empty() {
-            data[0] = marker;
-        }
-        Ok(())
-    }
-
-    // Missing owner check: trusts data from an arbitrary account.
-    pub fn moc_set_secret(ctx: Context<MocSetSecret>, new_secret: u64) -> Result<()> {
+    // Missing owner check: trusts data from an arbitrary policy account.
+    pub fn moc_update_policy_secret(
+        ctx: Context<MocUpdatePolicySecret>,
+        new_secret: u64,
+    ) -> Result<()> {
         let policy_data = ctx.accounts.policy_account.try_borrow_data()?;
         require!(
             !policy_data.is_empty() && policy_data[0] == 1,
-            DemoError::PolicyNotTrusted
+            VaultDemoError::PolicyNotTrusted
         );
-        ctx.accounts.state.secret = new_secret;
+        ctx.accounts.vault_state.secret = new_secret;
         Ok(())
     }
 
-    // Arbitrary CPI: no check that callee_program matches trusted_cpi_program.
-    pub fn acpi_call(ctx: Context<AcpiCall>, payload: Vec<u8>) -> Result<()> {
+    // Arbitrary CPI in plugin payout: no check that plugin_program matches trusted_plugin_program.
+    pub fn acpi_plugin_payout(
+        ctx: Context<AcpiPluginPayout>,
+        amount: u64,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        ctx.accounts.treasury_vault.amount = ctx
+            .accounts
+            .treasury_vault
+            .amount
+            .saturating_sub(amount);
         let ix = Instruction {
-            program_id: ctx.accounts.callee_program.key(),
+            program_id: ctx.accounts.plugin_program.key(),
             accounts: vec![],
             data: payload,
         };
-        invoke(&ix, &[ctx.accounts.callee_program.to_account_info()])?;
-        Ok(())
+        #[cfg(target_os = "solana")]
+        {
+            invoke(&ix, &[ctx.accounts.plugin_program.to_account_info()])?;
+            ctx.accounts.vault_state.payout_count =
+                ctx.accounts.vault_state.payout_count.saturating_add(1);
+            Ok(())
+        }
+        #[cfg(not(target_os = "solana"))]
+        {
+            // solana-program-test runs the program on the host; solana-invoke would panic here.
+            let _ = ix;
+            err!(VaultDemoError::CpiUnavailableOffChain)
+        }
     }
 
     // Missing key check: uses a clock-like account without validating pubkey.
-    pub fn mkc_gate(ctx: Context<MkcGate>, min_slot: u64) -> Result<()> {
+    pub fn mkc_clock_gate(ctx: Context<MkcClockGate>, min_slot: u64) -> Result<()> {
         let raw = ctx.accounts.clock_like.try_borrow_data()?;
-        require!(raw.len() >= 8, DemoError::BadClockData);
+        require!(raw.len() >= 8, VaultDemoError::BadClockData);
         let mut slot_bytes = [0u8; 8];
         slot_bytes.copy_from_slice(&raw[0..8]);
         let provided_slot = u64::from_le_bytes(slot_bytes);
-        require!(provided_slot >= min_slot, DemoError::SlotTooLow);
+        require!(provided_slot >= min_slot, VaultDemoError::SlotTooLow);
 
-        ctx.accounts.state.counter = ctx.accounts.state.counter.saturating_add(1);
+        ctx.accounts.vault_state.payout_count =
+            ctx.accounts.vault_state.payout_count.saturating_add(1);
         Ok(())
     }
 
-    // Integer bug: wrapping math can underflow/overflow.
-    pub fn ib_transfer(ctx: Context<IbTransfer>, amount: u64) -> Result<()> {
+    // Integer bug in vault transfer: wrapping math can underflow/overflow.
+    pub fn ib_internal_transfer(ctx: Context<IbInternalTransfer>, amount: u64) -> Result<()> {
         ctx.accounts.from_vault.amount = ctx.accounts.from_vault.amount.wrapping_sub(amount);
         ctx.accounts.to_vault.amount = ctx.accounts.to_vault.amount.wrapping_add(amount);
         Ok(())
@@ -86,9 +106,9 @@ pub mod fuzztooldemo {
 }
 
 #[derive(Accounts)]
-pub struct Initialize<'info> {
-    #[account(init, payer = payer, space = 8 + DemoState::SIZE)]
-    pub state: Account<'info, DemoState>,
+pub struct InitializeVault<'info> {
+    #[account(init, payer = payer, space = 8 + VaultState::SIZE)]
+    pub vault_state: Account<'info, VaultState>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
@@ -96,49 +116,42 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
-pub struct MscSetSecret<'info> {
+pub struct MscUpdateWithdrawLimit<'info> {
     #[account(mut)]
-    pub state: Account<'info, DemoState>,
+    pub vault_state: Account<'info, VaultState>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
     pub authority: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-pub struct MscMinimal<'info> {
-    /// CHECK: Intentionally unchecked writable account for minimal demo.
+pub struct MocUpdatePolicySecret<'info> {
     #[account(mut)]
-    pub target: UncheckedAccount<'info>,
-    /// CHECK: Intentionally unchecked and no signer requirement.
-    pub authority: UncheckedAccount<'info>,
-}
-
-#[derive(Accounts)]
-pub struct MocSetSecret<'info> {
-    #[account(mut)]
-    pub state: Account<'info, DemoState>,
+    pub vault_state: Account<'info, VaultState>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
     pub policy_account: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-pub struct AcpiCall<'info> {
+pub struct AcpiPluginPayout<'info> {
     #[account(mut)]
-    pub state: Account<'info, DemoState>,
+    pub vault_state: Account<'info, VaultState>,
+    #[account(mut)]
+    pub treasury_vault: Account<'info, VaultBalance>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
-    pub callee_program: UncheckedAccount<'info>,
+    pub plugin_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-pub struct MkcGate<'info> {
+pub struct MkcClockGate<'info> {
     #[account(mut)]
-    pub state: Account<'info, DemoState>,
+    pub vault_state: Account<'info, VaultState>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
     pub clock_like: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-pub struct IbTransfer<'info> {
-    pub state: Account<'info, DemoState>,
+pub struct IbInternalTransfer<'info> {
+    pub vault_state: Account<'info, VaultState>,
     #[account(mut)]
     pub from_vault: Account<'info, VaultBalance>,
     #[account(mut)]
@@ -146,16 +159,17 @@ pub struct IbTransfer<'info> {
 }
 
 #[account]
-pub struct DemoState {
+pub struct VaultState {
     pub authority: Pubkey,
-    pub trusted_cpi_program: Pubkey,
+    pub trusted_plugin_program: Pubkey,
     pub trusted_clock_key: Pubkey,
+    pub withdraw_limit: u64,
     pub secret: u64,
-    pub counter: u64,
+    pub payout_count: u64,
 }
 
-impl DemoState {
-    pub const SIZE: usize = 32 + 32 + 32 + 8 + 8;
+impl VaultState {
+    pub const SIZE: usize = 32 + 32 + 32 + 8 + 8 + 8;
 }
 
 #[account]
@@ -164,7 +178,7 @@ pub struct VaultBalance {
 }
 
 #[error_code]
-pub enum DemoError {
+pub enum VaultDemoError {
     #[msg("Caller is not authorized.")]
     Unauthorized,
     #[msg("Policy account did not contain trusted marker.")]
@@ -173,4 +187,6 @@ pub enum DemoError {
     BadClockData,
     #[msg("Clock-like slot was below the required minimum.")]
     SlotTooLow,
+    #[msg("CPI is only executable on-chain; host test runtimes cannot invoke.")]
+    CpiUnavailableOffChain,
 }
