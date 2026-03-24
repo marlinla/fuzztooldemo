@@ -19,6 +19,18 @@ print_sep() {
   printf '\n%s\n' "============================================================"
 }
 
+has_finding_marker() {
+  local file="$1"
+  local line lower_line
+  while IFS= read -r line; do
+    lower_line="${line,,}"
+    if [[ "${lower_line}" == *"finding:"* ]]; then
+      return 0
+    fi
+  done < "${file}"
+  return 1
+}
+
 run_target() {
   local target="$1"
   print_sep
@@ -35,7 +47,7 @@ run_target() {
   set -e
 
   local verdict
-  if rg -q "finding:" "${output_file}"; then
+  if has_finding_marker "${output_file}"; then
     verdict="FOUND"
   elif [[ "${code}" -eq 0 ]]; then
     verdict="NO_FINDING"
