@@ -1,25 +1,25 @@
 # Trident Solana Fuzz Demo
 
 This repository is a demo project for the Trident Solana fuzzing framework.
-The demo is designed for a short presentation (<= 4 minutes) and is aligned
-with the five vulnerability classes listed in Section 3.1 of:
+The active case study is a vulnerable **single-owner vault with plugin payout**
+and it maps to the five vulnerability classes in Section 3.1 of:
 
 - [Fuzz on the Beach: Fuzzing Solana Smart Contracts](https://arxiv.org/abs/2309.03006)
 
 ## Demo Goals
 
 - Show how Trident can execute fuzz targets against an Anchor program.
-- Map fuzz targets to Solana vulnerability classes.
-- Demonstrate one working end-to-end finding path (Missing Signer Check).
+- Map fuzz targets to all five Solana vulnerability classes.
+- Demonstrate end-to-end findings for each class.
 - Keep the workflow simple and reproducible for classroom/demo use.
 
 ## Vulnerability Mapping
 
-- `fuzz_msc` -> Missing Signer Check (implemented end-to-end)
-- `fuzz_moc` -> Missing Owner Check (scaffold)
-- `fuzz_acpi` -> Arbitrary CPI (scaffold)
-- `fuzz_mkc` -> Missing Key Check (scaffold)
-- `fuzz_ib` -> Integer Bugs (scaffold)
+- `fuzz_msc` -> Missing Signer Check (`msc_update_withdraw_limit`)
+- `fuzz_moc` -> Missing Owner Check (`moc_update_policy_secret`)
+- `fuzz_acpi` -> Arbitrary CPI (`acpi_plugin_payout`)
+- `fuzz_mkc` -> Missing Key Check (`mkc_clock_gate`)
+- `fuzz_ib` -> Integer Bugs (`ib_internal_transfer`)
 
 The target program is in:
 
@@ -29,25 +29,14 @@ The Trident fuzz targets are in:
 
 - `trident-tests/`
 
-## Current Working Demo Target
-
-The simplest confidence target is `fuzz_msc`, which exercises a minimal
-missing-signer vulnerability:
-
-- Program instruction: `msc_minimal`
-- Behavior: mutates writable account data without requiring the authority
-  account to be a signer.
-- Fuzz finding signal: the run prints
-  `MSC finding: non-signer authority call succeeded (seeded run should reject this).`
-
 ## Project Structure (Demo-Relevant)
 
 - `programs/fuzztooldemo/src/lib.rs` - vulnerable demo instructions
-- `trident-tests/fuzz_msc/test_fuzz.rs` - working MSC fuzz target
-- `trident-tests/fuzz_moc/test_fuzz.rs` - MOC scaffold
-- `trident-tests/fuzz_acpi/test_fuzz.rs` - ACPI scaffold
-- `trident-tests/fuzz_mkc/test_fuzz.rs` - MKC scaffold
-- `trident-tests/fuzz_ib/test_fuzz.rs` - IB scaffold
+- `trident-tests/fuzz_msc/test_fuzz.rs` - MSC harness
+- `trident-tests/fuzz_moc/test_fuzz.rs` - MOC harness
+- `trident-tests/fuzz_acpi/test_fuzz.rs` - ACPI harness
+- `trident-tests/fuzz_mkc/test_fuzz.rs` - MKC harness
+- `trident-tests/fuzz_ib/test_fuzz.rs` - IB harness
 - `trident-tests/Trident.toml` - Trident program configuration
 - `DEMO_SCRIPT.md` - timed talk track for the presentation
 
@@ -61,22 +50,28 @@ Assumes Rust/Anchor/Trident are installed and available in `PATH`.
 cargo build-sbf --manifest-path "programs/fuzztooldemo/Cargo.toml" --sbf-out-dir "./sbf-artifacts"
 ```
 
-1. Run the working MSC target:
+1. Run all vulnerability targets:
 
 ```bash
 cd trident-tests
 trident fuzz run fuzz_msc
+trident fuzz run fuzz_moc
+trident fuzz run fuzz_acpi
+trident fuzz run fuzz_mkc
+trident fuzz run fuzz_ib
 ```
 
-## Expected Output (MSC)
-
-You should see a line similar to:
+## Expected Output
 
 ```text
-MSC finding: non-signer authority call succeeded (seeded run should reject this).
+MSC finding: ...
+MOC finding: ...
+ACPI finding: ...
+MKC finding: ...
+IB finding: ...
 ```
 
-This indicates the vulnerable path is reachable.
+Each line indicates a vulnerable path was reached.
 
 ## 4-Minute Demo Flow
 
@@ -87,9 +82,9 @@ Use the detailed script in:
 Suggested high-level flow:
 
 1. Explain the five vulnerability classes.
-1. Run `fuzz_msc` as the end-to-end confidence demo.
-1. Briefly point at the other four scaffold targets.
-1. Close with next step: fill scaffold flows and add replayable seeds.
+1. Run each of the five fuzz targets.
+1. Map each finding string to the corresponding vulnerability class.
+1. Show how AI-generated hypotheses can drive harness changes.
 
 ## Troubleshooting
 
