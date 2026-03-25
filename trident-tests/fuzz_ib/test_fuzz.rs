@@ -1,4 +1,7 @@
-use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
+use fuzz_tests::{
+    env_u64, guided_demo_mode, record_finding, trace_path, vuln_roll_denom,
+    ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS,
+};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -8,8 +11,8 @@ use anchor_lang::AnchorSerialize;
 #[derive(Default)]
 struct AccountAddresses {
     vault_state: Pubkey,
-    from_vault: Pubkey,
-    to_vault: Pubkey,
+    from_wallet: Pubkey,
+    to_wallet: Pubkey,
 }
 
 #[derive(FuzzTestMethods)]
@@ -30,8 +33,8 @@ impl IbFuzz {
     #[init]
     fn start(&mut self) {
         self.fuzz_accounts.vault_state = self.trident.random_pubkey();
-        self.fuzz_accounts.from_vault = self.trident.random_pubkey();
-        self.fuzz_accounts.to_vault = self.trident.random_pubkey();
+        self.fuzz_accounts.from_wallet = self.trident.random_pubkey();
+        self.fuzz_accounts.to_wallet = self.trident.random_pubkey();
 
         let state = fuzztooldemo::VaultState {
             authority: self.trident.random_pubkey(),
@@ -49,86 +52,96 @@ impl IbFuzz {
             &state,
         );
 
-        let from_vault = fuzztooldemo::VaultBalance {
-            amount: self.trident.random_from_range(0u64..=100u64),
-        };
-        let to_vault = fuzztooldemo::VaultBalance {
-            amount: self
-                .trident
-                .random_from_range((u64::MAX - 100u64)..=u64::MAX),
-        };
-        set_anchor_account(
-            &mut self.trident,
-            &self.fuzz_accounts.from_vault,
+        let from_wallet = AccountSharedData::new(
+            self.trident.random_from_range(2_000_000u64..=3_000_000u64),
+            0,
             &fuzztooldemo::id(),
-            fuzztooldemo::VaultBalance::DISCRIMINATOR,
-            &from_vault,
         );
-        set_anchor_account(
-            &mut self.trident,
-            &self.fuzz_accounts.to_vault,
+        let to_wallet = AccountSharedData::new(
+            self.trident.random_from_range(2_000_000u64..=3_000_000u64),
+            0,
             &fuzztooldemo::id(),
-            fuzztooldemo::VaultBalance::DISCRIMINATOR,
-            &to_vault,
         );
+        self.trident
+            .set_account_custom(&self.fuzz_accounts.from_wallet, &from_wallet);
+        self.trident
+            .set_account_custom(&self.fuzz_accounts.to_wallet, &to_wallet);
     }
 
     #[flow]
     fn integer_bug_flow(&mut self) {
-        // ~10% of iterations force underflow or overflow; the rest use safe values (no wrapping bug).
-        let attempt_vulnerable =
-            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let attempt_vulnerable = if guided_demo_mode() {
+            // Demo mode: schedule wraparound-friendly input shapes.
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1
+        } else {
+            // Paper mode: sample shape directly, without scheduled vulnerability attempts.
+            self.trident.random_from_range(0u8..=1u8) == 1
+        };
         let (from_initial, to_initial, amount) = if attempt_vulnerable {
-            let from_initial = self.trident.random_from_range(0u64..=100u64);
-            let to_initial = self
+            let delta_to_max = self.trident.random_from_range(0u64..=5u64);
+            let to_initial = u64::MAX - delta_to_max;
+            let amount = self
                 .trident
-                .random_from_range((u64::MAX - 100u64)..=u64::MAX);
-            let amount = self.trident.random_from_range(0u64..=u64::MAX);
+                .random_from_range((delta_to_max + 1)..=(delta_to_max + 100));
+            let from_initial = self
+                .trident
+                .random_from_range((amount + 2_000_000)..=(amount + 3_000_000));
             (from_initial, to_initial, amount)
         } else {
-            let from_initial = self.trident.random_from_range(50u64..=100u64);
-            let to_initial = self.trident.random_from_range(0u64..=1_000_000u64);
+            let from_initial = self.trident.random_from_range(2_000_000u64..=3_000_000u64);
+            let to_initial = self.trident.random_from_range(2_000_000u64..=3_000_000u64);
             let amount = self.trident.random_from_range(0u64..=from_initial);
             (from_initial, to_initial, amount)
         };
+        trace_path(
+            "fuzz_ib",
+            &[
+                ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                ("from_initial", from_initial.to_string()),
+                ("to_initial", to_initial.to_string()),
+                ("amount", amount.to_string()),
+            ],
+        );
 
-        set_anchor_account(
-            &mut self.trident,
-            &self.fuzz_accounts.from_vault,
-            &fuzztooldemo::id(),
-            fuzztooldemo::VaultBalance::DISCRIMINATOR,
-            &fuzztooldemo::VaultBalance {
-                amount: from_initial,
-            },
-        );
-        set_anchor_account(
-            &mut self.trident,
-            &self.fuzz_accounts.to_vault,
-            &fuzztooldemo::id(),
-            fuzztooldemo::VaultBalance::DISCRIMINATOR,
-            &fuzztooldemo::VaultBalance { amount: to_initial },
-        );
+        let from_wallet = AccountSharedData::new(from_initial, 0, &fuzztooldemo::id());
+        let to_wallet = AccountSharedData::new(to_initial, 0, &fuzztooldemo::id());
+        self.trident
+            .set_account_custom(&self.fuzz_accounts.from_wallet, &from_wallet);
+        self.trident
+            .set_account_custom(&self.fuzz_accounts.to_wallet, &to_wallet);
 
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::IbInternalTransfer {
+            accounts: fuzztooldemo::accounts::IbLamportTransfer {
                 vault_state: self.fuzz_accounts.vault_state,
-                from_vault: self.fuzz_accounts.from_vault,
-                to_vault: self.fuzz_accounts.to_vault,
+                from_wallet: self.fuzz_accounts.from_wallet,
+                to_wallet: self.fuzz_accounts.to_wallet,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::IbInternalTransfer { amount }.data(),
+            data: fuzztooldemo::instruction::IbLamportTransfer { amount }.data(),
         };
 
         let tx_result = self
             .trident
-            .process_transaction(&[ix], Some("ib_internal_transfer"));
-        let underflow_path = amount > from_initial;
+            .process_transaction(&[ix], Some("ib_lamport_transfer"));
         let overflow_path = to_initial.checked_add(amount).is_none();
+        let program_success_log = format!("Program {} success", fuzztooldemo::id());
+        let reached_buggy_write = tx_result.logs().contains(&program_success_log);
 
-        if attempt_vulnerable && tx_result.is_success() && (underflow_path || overflow_path) {
+        if attempt_vulnerable && overflow_path && reached_buggy_write {
+            record_finding(
+                "fuzz_ib",
+                "wrapping lamport transfer path reached",
+                &[
+                    ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                    ("overflow_path", overflow_path.to_string()),
+                    ("from_initial", from_initial.to_string()),
+                    ("to_initial", to_initial.to_string()),
+                    ("amount", amount.to_string()),
+                ],
+            );
             eprintln!(
-                "IB finding: wrapping internal vault transfer accepted (from={}, to={}, amount={}).",
+                "IB finding: wrapping lamport transfer path reached (from={}, to={}, amount={}).",
                 from_initial, to_initial, amount
             );
             std::process::exit(99);

@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 #[cfg(target_os = "solana")]
 use anchor_lang::solana_program::program::invoke;
 
@@ -38,16 +38,24 @@ pub mod fuzztooldemo {
         Ok(())
     }
 
-    // Missing owner check: trusts data from an arbitrary policy account.
+    // Missing owner check: trusts data from an arbitrary policy account, then
+    // uses that data to authorize writes to a vault account.
     pub fn moc_update_policy_secret(
         ctx: Context<MocUpdatePolicySecret>,
         new_secret: u64,
     ) -> Result<()> {
         let policy_data = ctx.accounts.policy_account.try_borrow_data()?;
         require!(
-            !policy_data.is_empty() && policy_data[0] == 1,
+            policy_data.len() >= 33 && policy_data[0] == 1,
             VaultDemoError::PolicyNotTrusted
         );
+        let referenced_vault = read_policy_vault_key(&policy_data)?;
+        require_keys_eq!(
+            referenced_vault,
+            ctx.accounts.treasury_vault.key(),
+            VaultDemoError::PolicyTargetMismatch
+        );
+        ctx.accounts.treasury_vault.amount = ctx.accounts.treasury_vault.amount.saturating_sub(1);
         ctx.accounts.vault_state.secret = new_secret;
         Ok(())
     }
@@ -65,12 +73,19 @@ pub mod fuzztooldemo {
             .saturating_sub(amount);
         let ix = Instruction {
             program_id: ctx.accounts.plugin_program.key(),
-            accounts: vec![],
+            // Pass treasury as writable CPI input to model a realistic high-impact ACPI sink.
+            accounts: vec![AccountMeta::new(ctx.accounts.treasury_vault.key(), false)],
             data: payload,
         };
         #[cfg(target_os = "solana")]
         {
-            invoke(&ix, &[ctx.accounts.plugin_program.to_account_info()])?;
+            invoke(
+                &ix,
+                &[
+                    ctx.accounts.plugin_program.to_account_info(),
+                    ctx.accounts.treasury_vault.to_account_info(),
+                ],
+            )?;
             ctx.accounts.vault_state.payout_count =
                 ctx.accounts.vault_state.payout_count.saturating_add(1);
             Ok(())
@@ -83,13 +98,14 @@ pub mod fuzztooldemo {
         }
     }
 
-    // Missing key check: uses a clock-like account without validating pubkey.
+    // Missing key check: calls a sensitive helper without validating the passed key.
     pub fn mkc_clock_gate(ctx: Context<MkcClockGate>, min_slot: u64) -> Result<()> {
-        let raw = ctx.accounts.clock_like.try_borrow_data()?;
-        require!(raw.len() >= 8, VaultDemoError::BadClockData);
-        let mut slot_bytes = [0u8; 8];
-        slot_bytes.copy_from_slice(&raw[0..8]);
-        let provided_slot = u64::from_le_bytes(slot_bytes);
+        let expected_clock_key = ctx.accounts.vault_state.trusted_clock_key;
+        let provided_clock_key = ctx.accounts.clock_like.key();
+        // Vulnerability by design: we should verify the key before this call.
+        let provided_slot = load_slot_sysvar_like(&ctx.accounts.clock_like.to_account_info())?;
+        // Vulnerability by design: we do NOT enforce provided_clock_key == expected_clock_key.
+        let _ = (expected_clock_key, provided_clock_key);
         require!(provided_slot >= min_slot, VaultDemoError::SlotTooLow);
 
         ctx.accounts.vault_state.payout_count =
@@ -97,12 +113,37 @@ pub mod fuzztooldemo {
         Ok(())
     }
 
-    // Integer bug in vault transfer: wrapping math can underflow/overflow.
-    pub fn ib_internal_transfer(ctx: Context<IbInternalTransfer>, amount: u64) -> Result<()> {
-        ctx.accounts.from_vault.amount = ctx.accounts.from_vault.amount.wrapping_sub(amount);
-        ctx.accounts.to_vault.amount = ctx.accounts.to_vault.amount.wrapping_add(amount);
+    // Integer bug in lamport transfer: wrapping math can underflow/overflow lamports.
+    pub fn ib_lamport_transfer(ctx: Context<IbLamportTransfer>, amount: u64) -> Result<()> {
+        let from_before = ctx.accounts.from_wallet.lamports();
+        let to_before = ctx.accounts.to_wallet.lamports();
+        let (from_after, to_after) = ib_wrap_lamports(from_before, to_before, amount);
+        **ctx.accounts.from_wallet.try_borrow_mut_lamports()? = from_after;
+        **ctx.accounts.to_wallet.try_borrow_mut_lamports()? = to_after;
         Ok(())
     }
+}
+
+pub fn ib_wrap_lamports(from_before: u64, to_before: u64, amount: u64) -> (u64, u64) {
+    (
+        from_before.wrapping_sub(amount),
+        to_before.wrapping_add(amount),
+    )
+}
+
+fn load_slot_sysvar_like(clock_like: &AccountInfo) -> Result<u64> {
+    let raw = clock_like.try_borrow_data()?;
+    require!(raw.len() >= 8, VaultDemoError::BadClockData);
+    let mut slot_bytes = [0u8; 8];
+    slot_bytes.copy_from_slice(&raw[0..8]);
+    Ok(u64::from_le_bytes(slot_bytes))
+}
+
+fn read_policy_vault_key(policy_data: &[u8]) -> Result<Pubkey> {
+    require!(policy_data.len() >= 33, VaultDemoError::PolicyNotTrusted);
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&policy_data[1..33]);
+    Ok(Pubkey::new_from_array(key_bytes))
 }
 
 #[derive(Accounts)]
@@ -127,6 +168,8 @@ pub struct MscUpdateWithdrawLimit<'info> {
 pub struct MocUpdatePolicySecret<'info> {
     #[account(mut)]
     pub vault_state: Account<'info, VaultState>,
+    #[account(mut)]
+    pub treasury_vault: Account<'info, VaultBalance>,
     /// CHECK: Intentionally unchecked for vulnerability demo.
     pub policy_account: UncheckedAccount<'info>,
 }
@@ -150,12 +193,14 @@ pub struct MkcClockGate<'info> {
 }
 
 #[derive(Accounts)]
-pub struct IbInternalTransfer<'info> {
+pub struct IbLamportTransfer<'info> {
     pub vault_state: Account<'info, VaultState>,
     #[account(mut)]
-    pub from_vault: Account<'info, VaultBalance>,
+    /// CHECK: Intentionally unchecked for vulnerability demo.
+    pub from_wallet: UncheckedAccount<'info>,
     #[account(mut)]
-    pub to_vault: Account<'info, VaultBalance>,
+    /// CHECK: Intentionally unchecked for vulnerability demo.
+    pub to_wallet: UncheckedAccount<'info>,
 }
 
 #[account]
@@ -183,6 +228,8 @@ pub enum VaultDemoError {
     Unauthorized,
     #[msg("Policy account did not contain trusted marker.")]
     PolicyNotTrusted,
+    #[msg("Policy account did not target the provided treasury account.")]
+    PolicyTargetMismatch,
     #[msg("Clock-like account data was malformed.")]
     BadClockData,
     #[msg("Clock-like slot was below the required minimum.")]

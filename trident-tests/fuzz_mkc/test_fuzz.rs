@@ -1,4 +1,7 @@
-use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
+use fuzz_tests::{
+    env_u64, guided_demo_mode, record_finding, trace_path, vuln_roll_denom,
+    ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS,
+};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -64,15 +67,27 @@ impl MkcFuzz {
             .trident
             .random_from_range(min_slot..=u64::MAX);
 
-        // ~10% of iterations use a spoofed clock-like account (vulnerable path). The rest use the real
-        // Clock sysvar with valid slot data — success is expected and is not an MKC finding.
-        let attempt_vulnerable =
-            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let attempt_vulnerable = if guided_demo_mode() {
+            // Demo mode: schedule spoofed-key attempts for a stable live demo.
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1
+        } else {
+            // Paper mode: sample spoofed-key attempts directly.
+            self.trident.random_from_range(0u8..=1u8) == 1
+        };
         let clock_like = if attempt_vulnerable {
             self.fuzz_accounts.spoofed_clock_like
         } else {
             solana_sdk::sysvar::clock::id()
         };
+        trace_path(
+            "fuzz_mkc",
+            &[
+                ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                ("uses_spoofed_clock", (clock_like == self.fuzz_accounts.spoofed_clock_like).to_string()),
+                ("min_slot", min_slot.to_string()),
+                ("provided_slot", provided_slot.to_string()),
+            ],
+        );
 
         let mut clock_data = vec![0u8; 8];
         clock_data.copy_from_slice(&provided_slot.to_le_bytes());
@@ -98,9 +113,21 @@ impl MkcFuzz {
         let tx_result = self
             .trident
             .process_transaction(&[ix], Some("mkc_clock_gate"));
-        if attempt_vulnerable && tx_result.is_success() {
+        let bypassed_expected_key =
+            attempt_vulnerable && clock_like != solana_sdk::sysvar::clock::id();
+        if bypassed_expected_key && tx_result.is_success() {
+            record_finding(
+                "fuzz_mkc",
+                "spoofed clock key bypassed expected trusted_clock_key check",
+                &[
+                    ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                    ("uses_spoofed_clock", "true".to_string()),
+                    ("min_slot", min_slot.to_string()),
+                    ("provided_slot", provided_slot.to_string()),
+                ],
+            );
             eprintln!(
-                "MKC finding: spoofed non-sysvar clock accepted for vault gate (slot={}, min_slot={}).",
+                "MKC finding: spoofed clock key bypassed expected trusted_clock_key check (slot={}, min_slot={}).",
                 provided_slot, min_slot
             );
             std::process::exit(99);

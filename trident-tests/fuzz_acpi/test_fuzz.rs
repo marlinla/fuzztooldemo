@@ -1,4 +1,7 @@
-use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
+use fuzz_tests::{
+    env_u64, guided_demo_mode, record_finding, trace_path, vuln_roll_denom,
+    ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS,
+};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -62,9 +65,11 @@ impl AcpiFuzz {
 
     #[flow]
     fn arbitrary_cpi_flow(&mut self) {
-        // ~10% of iterations pass an untrusted plugin program; the rest use the trusted id from state.
-        let attempt_vulnerable =
-            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let attempt_vulnerable = if guided_demo_mode() {
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1
+        } else {
+            self.trident.random_from_range(0u8..=1u8) == 1
+        };
         let use_attacker_program = attempt_vulnerable;
         let callee_program = if use_attacker_program {
             self.fuzz_accounts.attacker_program
@@ -72,7 +77,17 @@ impl AcpiFuzz {
             self.fuzz_accounts.trusted_program
         };
         let payload = vec![0u8; self.trident.random_from_range(0usize..=8usize)];
+        let payload_len = payload.len();
         let amount = self.trident.random_from_range(1u64..=5_000u64);
+        trace_path(
+            "fuzz_acpi",
+            &[
+                ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                ("uses_attacker_program", use_attacker_program.to_string()),
+                ("amount", amount.to_string()),
+                ("payload_len", payload_len.to_string()),
+            ],
+        );
 
         let ix = Instruction {
             program_id: fuzztooldemo::id(),
@@ -93,6 +108,17 @@ impl AcpiFuzz {
 
         // Finding criterion: untrusted callee was reached by CPI at all.
         if use_attacker_program && cpi_reached {
+            record_finding(
+                "fuzz_acpi",
+                "plugin payout invoked untrusted program",
+                &[
+                    ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                    ("uses_attacker_program", use_attacker_program.to_string()),
+                    ("callee_program", callee_program.to_string()),
+                    ("amount", amount.to_string()),
+                    ("payload_len", payload_len.to_string()),
+                ],
+            );
             eprintln!(
                 "ACPI finding: plugin payout invoked untrusted program {}.",
                 callee_program

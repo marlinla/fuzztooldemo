@@ -125,6 +125,27 @@ fn add_unchecked_account(pt: &mut ProgramTest, key: Pubkey, owner: Pubkey, data:
     );
 }
 
+fn add_lamport_only_account(pt: &mut ProgramTest, key: Pubkey, owner: Pubkey, lamports: u64) {
+    pt.add_account(
+        key,
+        Account {
+            lamports,
+            data: vec![],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+fn policy_data_with_target(target: Pubkey, tail: &[u8]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(33 + tail.len());
+    data.push(1);
+    data.extend_from_slice(target.as_ref());
+    data.extend_from_slice(tail);
+    data
+}
+
 async fn send_ix(
     ctx: &mut solana_program_test::ProgramTestContext,
     ix: Instruction,
@@ -199,6 +220,18 @@ async fn read_vault_balance(
     fuzztooldemo::VaultBalance::try_deserialize(&mut data).expect("vault balance deserialize")
 }
 
+async fn read_account_lamports(
+    ctx: &mut solana_program_test::ProgramTestContext,
+    key: Pubkey,
+) -> u64 {
+    ctx.banks_client
+        .get_account(key)
+        .await
+        .expect("account query should succeed")
+        .expect("account should exist")
+        .lamports
+}
+
 #[tokio::test]
 async fn honest_flow_passes() {
     log_setup("Initialize honest vault scenario with trusted accounts and safe balances.");
@@ -207,8 +240,8 @@ async fn honest_flow_passes() {
     let policy_account = Pubkey::new_unique();
     let trusted_clock = Pubkey::new_unique();
     let treasury = Pubkey::new_unique();
-    let from_vault = Pubkey::new_unique();
-    let to_vault = Pubkey::new_unique();
+    let from_wallet = Pubkey::new_unique();
+    let to_wallet = Pubkey::new_unique();
 
     let mut pt = setup_program_test();
     add_vault_state(
@@ -219,9 +252,14 @@ async fn honest_flow_passes() {
         trusted_clock,
     );
     add_vault_balance(&mut pt, treasury, 1_000);
-    add_vault_balance(&mut pt, from_vault, 50);
-    add_vault_balance(&mut pt, to_vault, 50);
-    add_unchecked_account(&mut pt, policy_account, fuzztooldemo::id(), vec![1, 0, 0, 0]);
+    add_lamport_only_account(&mut pt, from_wallet, fuzztooldemo::id(), 1_000_000);
+    add_lamport_only_account(&mut pt, to_wallet, fuzztooldemo::id(), 1_000_000);
+    add_unchecked_account(
+        &mut pt,
+        policy_account,
+        fuzztooldemo::id(),
+        policy_data_with_target(treasury, &[0, 0, 0, 0]),
+    );
     add_unchecked_account(
         &mut pt,
         trusted_clock,
@@ -256,6 +294,7 @@ async fn honest_flow_passes() {
             program_id: fuzztooldemo::id(),
             accounts: fuzztooldemo::accounts::MocUpdatePolicySecret {
                 vault_state,
+                treasury_vault: treasury,
                 policy_account,
             }
             .to_account_metas(None),
@@ -286,13 +325,13 @@ async fn honest_flow_passes() {
         &mut ctx,
         Instruction {
             program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::IbInternalTransfer {
+            accounts: fuzztooldemo::accounts::IbLamportTransfer {
                 vault_state,
-                from_vault,
-                to_vault,
+                from_wallet,
+                to_wallet,
             }
             .to_account_metas(None),
-            data: fuzztooldemo::instruction::IbInternalTransfer { amount: 10 }.data(),
+            data: fuzztooldemo::instruction::IbLamportTransfer { amount: 10 }.data(),
         },
         &[],
     )
@@ -300,16 +339,17 @@ async fn honest_flow_passes() {
 
     let state = read_vault_state(&mut ctx, vault_state).await;
     let treasury_after = read_vault_balance(&mut ctx, treasury).await;
-    let from_after = read_vault_balance(&mut ctx, from_vault).await;
-    let to_after = read_vault_balance(&mut ctx, to_vault).await;
+    let from_after = read_account_lamports(&mut ctx, from_wallet).await;
+    let to_after = read_account_lamports(&mut ctx, to_wallet).await;
 
     log_expect("All honest operations succeed and state transitions are consistent.");
     assert_eq!(state.withdraw_limit, 777);
     assert_eq!(state.secret, 55);
     assert_eq!(state.payout_count, 1);
-    assert_eq!(treasury_after.amount, 1_000);
-    assert_eq!(from_after.amount, 40);
-    assert_eq!(to_after.amount, 60);
+    // MOC decrements the targeted treasury by one in the honest path.
+    assert_eq!(treasury_after.amount, 999);
+    assert_eq!(from_after, 999_990);
+    assert_eq!(to_after, 1_000_010);
     log_assert("Honest flow checks passed.");
 }
 
@@ -352,8 +392,9 @@ async fn msc_attack_reaches_vulnerability() {
 
 #[tokio::test]
 async fn moc_attack_reaches_vulnerability() {
-    log_setup("Initialize vault and attacker-owned policy account with trusted marker byte.");
+    log_setup("Initialize vault and attacker-owned policy account that references treasury key.");
     let vault_state = Pubkey::new_unique();
+    let treasury = Pubkey::new_unique();
     let policy_account = Pubkey::new_unique();
     let mut pt = setup_program_test();
     add_vault_state(
@@ -363,11 +404,12 @@ async fn moc_attack_reaches_vulnerability() {
         TRUSTED_PLUGIN_ID,
         Pubkey::new_unique(),
     );
+    add_vault_balance(&mut pt, treasury, 1_000);
     add_unchecked_account(
         &mut pt,
         policy_account,
         Pubkey::new_unique(),
-        vec![1, 42, 42, 42],
+        policy_data_with_target(treasury, &[42, 42, 42]),
     );
     let mut ctx = pt.start_with_context().await;
 
@@ -378,6 +420,7 @@ async fn moc_attack_reaches_vulnerability() {
             program_id: fuzztooldemo::id(),
             accounts: fuzztooldemo::accounts::MocUpdatePolicySecret {
                 vault_state,
+                treasury_vault: treasury,
                 policy_account,
             }
             .to_account_metas(None),
@@ -387,9 +430,11 @@ async fn moc_attack_reaches_vulnerability() {
     )
     .await;
 
-    log_expect("Missing owner check accepts attacker data and updates secret.");
+    log_expect("Missing owner check accepts attacker data, authorizes key match, and mutates treasury.");
     let state = read_vault_state(&mut ctx, vault_state).await;
+    let treasury_after = read_vault_balance(&mut ctx, treasury).await;
     assert_eq!(state.secret, 123);
+    assert_eq!(treasury_after.amount, 999);
     log_assert("MOC exploit state mutation observed.");
 }
 
@@ -487,43 +532,16 @@ async fn mkc_attack_reaches_vulnerability() {
 
 #[tokio::test]
 async fn ib_attack_reaches_vulnerability() {
-    log_setup("Initialize vault balances near arithmetic edge conditions.");
-    let vault_state = Pubkey::new_unique();
-    let from_vault = Pubkey::new_unique();
-    let to_vault = Pubkey::new_unique();
-    let mut pt = setup_program_test();
-    add_vault_state(
-        &mut pt,
-        vault_state,
-        Pubkey::new_unique(),
-        TRUSTED_PLUGIN_ID,
-        Pubkey::new_unique(),
-    );
-    add_vault_balance(&mut pt, from_vault, 5);
-    add_vault_balance(&mut pt, to_vault, u64::MAX - 3);
-    let mut ctx = pt.start_with_context().await;
+    log_setup("Exercise IB arithmetic helper at lamport wraparound edge.");
+    let from_before = 5u64;
+    let to_before = u64::MAX - 3;
+    let amount = 10u64;
 
-    log_action("Call internal transfer with amount that underflows/overflows wrapping math.");
-    send_ix(
-        &mut ctx,
-        Instruction {
-            program_id: fuzztooldemo::id(),
-            accounts: fuzztooldemo::accounts::IbInternalTransfer {
-                vault_state,
-                from_vault,
-                to_vault,
-            }
-            .to_account_metas(None),
-            data: fuzztooldemo::instruction::IbInternalTransfer { amount: 10 }.data(),
-        },
-        &[],
-    )
-    .await;
+    log_action("Apply wrapping lamport transfer math with overflow/underflow operands.");
+    let (from_after, to_after) = fuzztooldemo::ib_wrap_lamports(from_before, to_before, amount);
 
-    log_expect("Wrapping transfer causes underflow in from_vault and overflow in to_vault.");
-    let from_after = read_vault_balance(&mut ctx, from_vault).await;
-    let to_after = read_vault_balance(&mut ctx, to_vault).await;
-    assert_eq!(from_after.amount, u64::MAX - 4);
-    assert_eq!(to_after.amount, 6);
+    log_expect("Wrapping math underflows source and overflows destination.");
+    assert_eq!(from_after, u64::MAX - 4);
+    assert_eq!(to_after, 6);
     log_assert("IB exploit arithmetic outcomes observed.");
 }

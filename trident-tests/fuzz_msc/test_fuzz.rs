@@ -1,4 +1,7 @@
-use fuzz_tests::{env_u64, vuln_roll_denom, ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS};
+use fuzz_tests::{
+    env_u64, guided_demo_mode, record_finding, trace_path, vuln_roll_denom,
+    ENV_FUZZ_FLOW_CALLS, ENV_FUZZ_ITERATIONS,
+};
 use trident_fuzz::fuzzing::*;
 use anchor_lang::InstructionData;
 use anchor_lang::ToAccountMetas;
@@ -55,11 +58,23 @@ impl MscFuzz {
 
     #[flow]
     fn missing_signer_check_flow(&mut self) {
-        // ~10% of iterations attempt the vulnerable path (non-signer); the rest use a signer.
-        let attempt_vulnerable =
-            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1;
+        let attempt_vulnerable = if guided_demo_mode() {
+            // Demo mode: usually safe paths, with scheduled vulnerable attempts.
+            self.trident.random_from_range(1u64..=vuln_roll_denom()) == 1
+        } else {
+            // Paper mode: no external scheduling; signer status is sampled directly.
+            self.trident.random_from_range(0u8..=1u8) == 1
+        };
         let should_sign_authority = !attempt_vulnerable;
         let new_limit = self.trident.random_from_range(11u64..=u64::MAX);
+        trace_path(
+            "fuzz_msc",
+            &[
+                ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                ("authority_should_sign", should_sign_authority.to_string()),
+                ("new_limit", new_limit.to_string()),
+            ],
+        );
 
         let mut account_metas = fuzztooldemo::accounts::MscUpdateWithdrawLimit {
             vault_state: self.fuzz_accounts.vault_state,
@@ -81,6 +96,15 @@ impl MscFuzz {
             .process_transaction(&[ix], Some("msc_update_withdraw_limit"));
 
         if !should_sign_authority && tx_result.is_success() {
+            record_finding(
+                "fuzz_msc",
+                "non-signer authority updated withdraw_limit",
+                &[
+                    ("attempt_vulnerable", attempt_vulnerable.to_string()),
+                    ("authority_should_sign", should_sign_authority.to_string()),
+                    ("new_limit", new_limit.to_string()),
+                ],
+            );
             eprintln!(
                 "MSC finding: non-signer authority updated withdraw_limit."
             );
