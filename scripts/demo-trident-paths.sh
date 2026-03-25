@@ -39,6 +39,14 @@ run_target() {
   local marker="$2"
   local logfile
   logfile="$(mktemp)"
+  local artifact_file="${RESULTS_DIR}/${target}.jsonl"
+  local artifact_lines_before=0
+  local artifact_lines_after=0
+  local artifact_is_new=0
+
+  if [[ -f "${artifact_file}" ]]; then
+    artifact_lines_before="$(wc -l < "${artifact_file}")"
+  fi
 
   set +e
   (
@@ -60,7 +68,81 @@ run_target() {
   fi
 
   printf "%-10s | %-10s | %-10s\n" "${target}" "${result}" "${status}"
-  grep -E "${marker} finding:|\\[TRACE\\]\\[${target}\\]" "${logfile}" | sed -n '1,3p' || true
+
+  local trace_line
+  trace_line="$(grep -E "\\[TRACE\\]\\[${target}\\].*attempt_vulnerable=true" "${logfile}" | sed -n '1,1p' || true)"
+  if [[ -z "${trace_line}" ]]; then
+    trace_line="$(grep -E "\\[TRACE\\]\\[${target}\\]" "${logfile}" | sed -n '1,1p' || true)"
+  fi
+
+  local trace_facts
+  trace_facts="$(printf "%s" "${trace_line}" | sed -E 's/^.*\] //' | sed 's/, / | /g')"
+
+  local finding_line
+  finding_line="$(grep -E "${marker} finding:" "${logfile}" | sed -n '1,1p' || true)"
+
+  echo "Story:"
+  if [[ -n "${trace_facts}" ]]; then
+    echo "  Path sampled  : ${trace_facts}"
+  else
+    echo "  Path sampled  : <no trace emitted>"
+  fi
+  if [[ -n "${finding_line}" ]]; then
+    echo "  Predicate hit : ${finding_line}"
+  else
+    echo "  Predicate hit : <none>"
+  fi
+
+  local artifact_line=""
+  if [[ -f "${artifact_file}" ]]; then
+    artifact_lines_after="$(wc -l < "${artifact_file}")"
+    if (( artifact_lines_after > 0 )); then
+      artifact_line="$(sed -n "${artifact_lines_after}p" "${artifact_file}")"
+    fi
+    if (( artifact_lines_after > artifact_lines_before )); then
+      artifact_is_new=1
+    fi
+  fi
+
+  if [[ "${result}" == "NO_FINDING" ]]; then
+    echo "  Evidence      : <none in this run>"
+  elif [[ -n "${artifact_line}" && "${artifact_is_new}" -eq 1 ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      ARTIFACT_LINE="${artifact_line}" python3 - <<'PY'
+import json
+import os
+
+line = os.environ.get("ARTIFACT_LINE", "").strip()
+if not line:
+    raise SystemExit(0)
+
+def shorten(value: str) -> str:
+    if len(value) <= 18:
+        return value
+    return f"{value[:8]}...{value[-6:]}"
+
+obj = json.loads(line)
+fields = obj.get("fields", {})
+interesting = []
+for key in ("attempt_vulnerable", "authority_should_sign", "uses_attacker_program", "amount", "payload_len", "callee_program"):
+    if key in fields:
+        val = str(fields[key])
+        if key == "callee_program":
+            val = shorten(val)
+        interesting.append(f"{key}={val}")
+
+summary = " | ".join(interesting) if interesting else "no structured fields"
+print(f"  Evidence      : finding=\"{obj.get('finding', '')}\" ({summary})")
+PY
+    else
+      echo "  Evidence      : ${artifact_line}"
+    fi
+  elif [[ -n "${artifact_line}" ]]; then
+    echo "  Evidence      : <latest entry is from a previous run>"
+  else
+    echo "  Evidence      : <none available>"
+  fi
+
   echo
   rm -f "${logfile}"
 }

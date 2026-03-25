@@ -18,7 +18,7 @@ It covers the five classes from Section 3.1 of
 
 - Runtime-faithful exploit discovery with **Trident fuzzing**
 - Human-readable happy-path and exploit checks with **Rust integration tests**
-- Focused 3-minute Trident pathing demo runner
+- Focused 3-minute Trident pathing demo runner with story-first output
 - Case-study package for AI-extendable primitive development (`CASE_STUDY.md`, `AI_WORKFLOW.md`, `EVALUATION.md`)
 
 ## Project Direction
@@ -214,8 +214,8 @@ IB finding: ...
 
 ### 4) Three-minute Trident path demo details
 
-This runner focuses on two high-signal targets (`MSC`, `ACPI`) and prints path traces
-so you can explain how Trident-generated paths trigger findings.
+This runner focuses on two high-signal targets (`MSC`, `ACPI`) and prints a
+story-first summary so you can explain pathing and findings quickly.
 
 ```bash
 ./scripts/demo-trident-paths.sh
@@ -223,11 +223,17 @@ so you can explain how Trident-generated paths trigger findings.
 
 What it shows:
 
-- Path exploration lines: `[TRACE][fuzz_*] key=value,...`
-- Finding predicate line: `MSC finding: ...` / `ACPI finding: ...`
-- Replay artifacts: JSONL records in `trident-tests/results/`
+- `Path sampled`: representative trace dimensions (prefers vulnerable-path sample when present)
+- `Predicate hit`: finding marker (`MSC finding: ...` / `ACPI finding: ...`)
+- `Evidence`: parsed finding fields from the current run, or `<none in this run>` for no-hit runs
 
-Example artifact entry:
+No-finding contrast run (to demonstrate path miss / false negative under constrained budget):
+
+```bash
+DEMO_FUZZ_ITERATIONS=1 DEMO_FUZZ_FLOW_CALLS=1 DEMO_VULN_ROLL_DENOM=10000 ./scripts/demo-trident-paths.sh
+```
+
+Example JSONL artifact entry (written on finding hit):
 
 ```json
 {"ts_ms":1711320000000,"target":"fuzz_msc","mode":"demo","finding":"non-signer authority updated withdraw_limit","fields":{"attempt_vulnerable":"true","authority_should_sign":"false","new_limit":"999"}}
@@ -237,7 +243,7 @@ Example artifact entry:
 
 Each harness follows the same Trident structure:
 
-1. `#[init]` seeds accounts/state for the target vulnerability class.
+1. `#[init]` seeds accounts for the target vulnerability class.
 2. `#[flow]` mutates path dimensions (signer bits, owners, callee programs, keys, amounts).
 3. Trident executes the generated instruction transaction.
 4. Harness predicates label exploitable paths and emit finding markers.
