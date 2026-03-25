@@ -85,6 +85,10 @@ Fuzz harnesses support two modes:
 Use `demo` for reproducible classroom walkthroughs, and `paper` when you want behavior
 closer to unguided oracle discovery.
 
+Handoff note: `demo` mode is guided for presentation reliability. Do not treat a short
+demo run as full-coverage evidence; use five-target runs (and optionally `paper` mode)
+for broader benchmark claims.
+
 ## Start Here (By Goal)
 
 - **Run baseline evidence quickly**
@@ -227,10 +231,19 @@ What it shows:
 - `Predicate hit`: finding marker (`MSC finding: ...` / `ACPI finding: ...`)
 - `Evidence`: parsed finding fields from the current run, or `<none in this run>` for no-hit runs
 
+Scope note: this script is a live-demo subset (`MSC`, `ACPI`) and not the complete
+five-class benchmark run.
+
 No-finding contrast run (to demonstrate path miss / false negative under constrained budget):
 
 ```bash
 DEMO_FUZZ_ITERATIONS=1 DEMO_FUZZ_FLOW_CALLS=1 DEMO_VULN_ROLL_DENOM=10000 ./scripts/demo-trident-paths.sh
+```
+
+Less-guided verification run (same live subset, but with reduced scheduling bias):
+
+```bash
+DEMO_FUZZ_MODE=paper ./scripts/demo-trident-paths.sh
 ```
 
 Example JSONL artifact entry (written on finding hit):

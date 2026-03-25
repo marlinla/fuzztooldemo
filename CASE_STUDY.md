@@ -85,6 +85,8 @@ trident fuzz run fuzz_ib
 - `demo` mode uses guided vulnerable-path scheduling for presentation reliability.
 - `paper` mode is less guided but still not identical to binary-only oracle internals from the paper runtime.
 - Current primitive extension is scaffold-only; implementation is tracked as next work.
+- The 3-minute runner (`scripts/demo-trident-paths.sh`) exercises only `MSC` and `ACPI`;
+  use the five-target command set for full Section 3.1 benchmark evidence.
 
 ## Deliverables Map
 
